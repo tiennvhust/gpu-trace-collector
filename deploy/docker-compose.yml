@@ -1,0 +1,40 @@
+# Local stack: single-node Kafka (KRaft — no ZooKeeper) + the collector.
+#
+# Two Kafka listeners because Docker networking:
+#   kafka:9092       — for containers on the compose network (the collector)
+#   localhost:29092  — for processes on the host (kcat, console consumer, you)
+services:
+  kafka:
+    image: apache/kafka:3.8.1
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+
+  collector:
+    build: ..
+    ports:
+      - "4317:4317"   # OTLP/gRPC — point the agent here
+      - "9464:9464"   # Prometheus /metrics + /healthz
+    volumes:
+      # Compose-specific config: same as collector.yaml but Kafka is reached
+      # via the compose network name (kafka:9092), not the host listener.
+      - ../configs/collector.compose.yaml:/etc/collector/collector.yaml:ro
+    depends_on:
+      kafka:
+        condition: service_healthy

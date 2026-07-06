@@ -1,0 +1,31 @@
+# gpu-trace-collector configuration.
+# ${VARS} are expanded from the environment at load time — keep secrets there.
+
+grpc_listen: ":4317"        # OTLP/gRPC (the agent's OTEL_EXPORTER_OTLP_ENDPOINT)
+http_listen: ":9464"        # /metrics (Prometheus) and /healthz
+queue_capacity: 8192        # bounded ingest queue — the backpressure boundary
+workers: 4                  # queue drain goroutines
+max_recv_msg_bytes: 4194304 # 4 MiB per gRPC message
+
+kafka:
+  brokers: ["localhost:29092"]   # docker-compose host listener; in-cluster use kafka:9092
+  topic: "telemetry.otlp"
+  tls: false
+  sasl:
+    enabled: false
+    # Azure Event Hubs (Kafka endpoint) settings look like:
+    #   brokers: ["<namespace>.servicebus.windows.net:9093"]
+    #   tls: true
+    #   sasl: { enabled: true, username: "$ConnectionString", password: "${EVENTHUBS_CONN_STR}" }
+    username: ""
+    password: ""
+
+tenants:
+  - name: dev
+    api_key: "dev-key-1"          # demo only — use ${COLLECTOR_KEY_DEV} in real deployments
+    events_per_sec: 5000
+    burst: 50000                  # must exceed the largest single export (see config.go)
+  - name: team-b
+    api_key: "team-b-key-1"
+    events_per_sec: 1000
+    burst: 10000

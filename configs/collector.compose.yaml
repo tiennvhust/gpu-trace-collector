@@ -1,0 +1,23 @@
+# Config used when the collector runs inside docker-compose:
+# identical to collector.yaml except Kafka is reached via the compose network.
+grpc_listen: ":4317"
+http_listen: ":9464"
+queue_capacity: 8192
+workers: 4
+max_recv_msg_bytes: 4194304
+
+kafka:
+  brokers: ["kafka:9092"]
+  topic: "telemetry.otlp"
+  tls: false
+  sasl: { enabled: false, username: "", password: "" }
+
+tenants:
+  - name: dev
+    api_key: "dev-key-1"
+    events_per_sec: 5000
+    burst: 50000
+  - name: team-b
+    api_key: "team-b-key-1"
+    events_per_sec: 1000
+    burst: 10000
