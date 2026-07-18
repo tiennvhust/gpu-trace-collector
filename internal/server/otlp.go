@@ -1,5 +1,11 @@
 // Package server implements the OTLP/gRPC receiver: the MetricsService and
 // LogsService Export RPCs that the agent's SDK exporters call.
+//
+// » We implement the OTLP protocol directly from the published protobufs
+// » (go.opentelemetry.io/proto/otlp) rather than importing the OTel
+// » Collector's receiver — the point of this project is to own the hot path.
+// » Protocol spec (read the sections on responses and retryability):
+// » https://opentelemetry.io/docs/specs/otlp/
 package server
 
 import (
@@ -18,6 +24,10 @@ import (
 	"github.com/tiennvhust/gpu-trace-collector/internal/pipeline"
 	"github.com/tiennvhust/gpu-trace-collector/internal/tenant"
 )
+
+// » Go quirk worth knowing: MetricsService and LogsService must be two types
+// » because both interfaces declare a method named Export with different
+// » signatures, and one type cannot carry both.
 
 // MetricsService implements the OTLP metrics Export RPC.
 type MetricsService struct {
@@ -55,12 +65,24 @@ func (s *MetricsService) Export(ctx context.Context,
 		return &colmetricspb.ExportMetricsServiceResponse{}, nil
 	}
 
+	// » Rate-limit in DATAPOINTS, not requests: one request can carry 10 or
+	// » 10,000 points, and a per-request limit would let clients tunnel
+	// » unlimited data through fewer, fatter requests. Meter the unit that
+	// » costs you money downstream.
 	if !t.Limiter.AllowN(time.Now(), n) {
 		s.m.Rejected.WithLabelValues(t.Name, "rate_limit").Inc()
+		// » ResourceExhausted is the OTLP-blessed "retryable, back off"
+		// » signal; SDK exporters retry it with exponential backoff.
+		// » https://opentelemetry.io/docs/specs/otlp/#otlpgrpc-response
 		return nil, status.Error(codes.ResourceExhausted,
 			"per-tenant rate limit exceeded, retry with backoff")
 	}
 
+	// » Re-serialize and forward the request VERBATIM. The collector adds
+	// » attribution (tenant key, headers) around the payload but does not
+	// » rewrite telemetry — parsing/enrichment belongs to the stream
+	// » processor, where a bug can be replayed from the log instead of
+	// » having dropped data at the edge.
 	payload, err := proto.Marshal(req)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "marshal: "+err.Error())
@@ -109,8 +131,42 @@ func (s *LogsService) Export(ctx context.Context,
 	return &collogspb.ExportLogsServiceResponse{}, nil
 }
 
+// EXERCISE-BEGIN
+// ─── EXERCISE 5: partial success ────────────────────────────────────────────
+// The baseline is all-or-nothing: the whole request is accepted or the whole
+// request is rejected. OTLP supports a middle path — accept the request but
+// report that some points were dropped — via the PartialSuccess message.
+//
+// Task: add a per-request datapoint ceiling (config: max_datapoints_per_req).
+//       When a request exceeds it, enqueue only the first ResourceMetrics
+//       entries that fit, and return ExportMetricsServiceResponse{
+//         PartialSuccess: &ExportMetricsPartialSuccess{
+//           RejectedDataPoints: <count>, ErrorMessage: "..."}}.
+// Think about: the client does NOT retry partial successes (spec!) — so when
+//       is dropping-and-telling better than rejecting-and-retrying? (Consider
+//       a client whose single request will NEVER fit under the limit.)
+// Spec: https://opentelemetry.io/docs/specs/otlp/#partial-success
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── EXERCISE 6: tell clients HOW LONG to back off ──────────────────────────
+// ResourceExhausted says "back off" but not "for how long". gRPC has a
+// standard detail message for exactly this: google.rpc.RetryInfo.
+//
+// Task: on rate-limit rejection, attach RetryInfo{RetryDelay: d} where d is
+//       derived from the limiter (hint: rate.Limiter.ReserveN tells you the
+//       wait; remember to Cancel() the reservation you don't use).
+//       Use status.New(...).WithDetails(&errdetails.RetryInfo{...}).
+// References:
+//   https://pkg.go.dev/google.golang.org/genproto/googleapis/rpc/errdetails
+//   https://grpc.io/docs/guides/error/
+// ─────────────────────────────────────────────────────────────────────────────
+// EXERCISE-END
+
 // countDataPoints walks a metrics request and counts individual datapoints —
 // the unit for rate limiting and the received_events metric.
+//
+// » OTLP nesting: ResourceMetrics → ScopeMetrics → Metric → oneof data →
+// » datapoints. Data model: https://opentelemetry.io/docs/specs/otel/metrics/data-model/
 func countDataPoints(req *colmetricspb.ExportMetricsServiceRequest) int {
 	n := 0
 	for _, rm := range req.GetResourceMetrics() {

@@ -1,4 +1,10 @@
 // gpu-trace-collector: multi-tenant OTLP ingestion → Kafka.
+//
+// » Data path (see README diagram):
+// »   agent ──OTLP/gRPC──▶ auth ▶ rate limit ▶ bounded queue ▶ Kafka
+// » Everything durable lives in Kafka; everything here is bounded and
+// » in-memory — which is what makes this process stateless and therefore
+// » trivially horizontally scalable (a plain Deployment + HPA on AKS).
 package main
 
 import (
@@ -36,6 +42,8 @@ func main() {
 
 	metrics := obs.New()
 
+	// » Construction order mirrors the data path in reverse — each stage
+	// » needs its downstream to exist first: sink → queue → gRPC services.
 	kafka, err := sink.New(cfg.Kafka, metrics)
 	if err != nil {
 		log.Fatalf("sink: %v", err)
@@ -50,9 +58,25 @@ func main() {
 	)
 	server.Register(gs, queue, metrics)
 
+	// » The standard gRPC health service: what a Kubernetes readinessProbe
+	// » (grpc probe type) will call. Readiness should mean "can do useful
+	// » work" — we proved Kafka reachability at startup via Ping; a later
+	// » refinement is flipping NOT_SERVING when produce errors spike.
+	// » https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 	hs := health.NewServer()
 	healthpb.RegisterHealthServer(gs, hs)
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+
+	// EXERCISE-BEGIN
+	// ─── EXERCISE 7 (stretch): profiling endpoint ───────────────────────────
+	// Add net/http/pprof to the HTTP mux (import _ "net/http/pprof" exposes
+	// /debug/pprof on the DefaultServeMux — decide whether that's acceptable
+	// or whether you want it on the private mux only). Then, under load from
+	// your generator, capture a CPU profile, find the top allocation site on
+	// the hot path, fix ONE thing, and record before/after in BENCHMARKS.md.
+	// https://go.dev/blog/pprof
+	// ─────────────────────────────────────────────────────────────────────────
+	// EXERCISE-END
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
@@ -84,6 +108,14 @@ func main() {
 	<-stop
 	log.Println("shutting down: draining in-flight requests and queue")
 
+	// » Shutdown is a pipeline drained front-to-back; this ordering is what
+	// » makes `kubectl rollout restart` lossless:
+	// »   1. GracefulStop: stop accepting RPCs, wait for in-flight handlers
+	// »      (every accepted item is now in the queue).
+	// »   2. queue.Close: workers drain remaining items into the sink.
+	// »   3. kafka.Close: Flush pushes the producer buffer to brokers.
+	// » Kubernetes gives terminationGracePeriodSeconds (default 30s) for all
+	// » of this — hence the deadline on the flush.
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 	gs.GracefulStop()
 	queue.Close()

@@ -1,58 +1,55 @@
-# gpu-trace-collector
+# gpu-trace-collector (learning edition)
 
-Multi-tenant telemetry ingestion service for
-[gpu-trace](https://github.com/tiennvhust/gpu-trace): receives OTLP/gRPC
-(metrics + logs) from agents, authenticates and rate-limits per tenant, and
-produces the raw OTLP payloads to Kafka or Azure Event Hubs for downstream
-stream processing.
+Multi-tenant telemetry ingestion service: receives OTLP/gRPC from
+[gpu-trace](https://github.com/tiennvhust/gpu-trace) agents, authenticates and
+rate-limits per tenant, and produces the raw OTLP payloads to Kafka (or Azure
+Event Hubs) for downstream stream processing.
 
 ```
 agent ──OTLP/gRPC──▶ [ auth ▶ rate limit ▶ bounded queue ▶ kafka producer ] ──▶ telemetry.otlp
                        └────────────── stateless, horizontally scalable ─┘
 ```
 
-## Design
+This is the **learning edition**: teaching comments are marked `// »`, and
+`EXERCISE` blocks describe follow-up tasks. The baseline compiles and works
+with every exercise left undone.
 
-- **Stateless.** Durability lives in Kafka; everything in-process is bounded
-  and in-memory. Replicas scale horizontally behind a plain load balancer.
-- **Backpressure over buffering.** The ingest queue is bounded; when full,
-  requests are rejected fast with `RESOURCE_EXHAUSTED`, which OTLP SDK
-  exporters retry with exponential backoff. Overload degrades into explicit,
-  observable rejections — never into an OOM.
-- **Per-tenant isolation.** Requests authenticate via an `x-api-key` gRPC
-  header; rate limits are token buckets enforced in datapoints, so one noisy
-  tenant cannot degrade the others.
-- **OTLP passthrough.** Kafka record: key = tenant, value = unmodified OTLP
-  protobuf, headers = `signal`, `encoding`. Downstream consumers share the
-  public OTLP schema; the collector owns no schema of its own.
-- **Delivery.** Producer runs idempotent with `acks=all` (no duplicates per
-  partition on the produce side); end-to-end exactly-once is completed by
-  consumers via idempotent writes.
+## Design in one paragraph
+
+The collector is deliberately stateless: durability lives in Kafka, and
+everything in-process is bounded and in-memory. The bounded queue is the
+backpressure boundary — when it fills, new requests are rejected with
+`RESOURCE_EXHAUSTED` (the OTLP-standard retryable signal) instead of being
+buffered toward an OOM. Rate limits are enforced per tenant, in datapoints
+(not requests), so one noisy tenant cannot degrade the others. Payloads are
+forwarded verbatim (key = tenant, value = raw OTLP protobuf) so the stream
+processor shares the public OTLP schema with the agent — the collector never
+becomes a schema owner.
 
 ## Layout
 
 ```
-cmd/collector/        wiring + graceful shutdown
+cmd/collector/        wiring + graceful shutdown ordering
 internal/config/      YAML config, env expansion, validation
 internal/tenant/      auth interceptor + per-tenant token buckets
-internal/server/      OTLP MetricsService/LogsService
-internal/pipeline/    bounded queue + worker pool
-internal/sink/        Kafka producer (franz-go)
+internal/server/      OTLP MetricsService/LogsService (the hot path)
+internal/pipeline/    bounded queue + worker pool (the backpressure boundary)
+internal/sink/        franz-go Kafka producer (acks=all, idempotent)
 internal/obs/         Prometheus self-metrics
-configs/              collector.yaml (host) / collector.compose.yaml (compose)
+configs/              collector.yaml (host) + collector.compose.yaml (compose)
 deploy/               docker-compose: single-node KRaft Kafka + collector
 ```
 
-## Quickstart
+## Run it
 
 ```bash
-make up      # Kafka + collector via docker compose
-# or natively against compose's Kafka:
-make run
+make up            # Kafka + collector (docker compose)
+# or run natively against compose's Kafka:
+make run           # uses configs/collector.yaml → localhost:29092
 ```
 
-Point an agent at it (no agent changes; the OTel SDK carries the key as gRPC
-metadata):
+Point the agent at it — no agent code changes; the OTel SDK carries the API
+key as gRPC metadata:
 
 ```bash
 sudo OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4317 \
@@ -60,39 +57,53 @@ sudo OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4317 \
      ./gpu-trace -pid <cuda-pid> -otel=grpc
 ```
 
-Verify:
+Verify data is landing:
 
 ```bash
-make consume                                        # records on telemetry.otlp
-curl -s localhost:9464/metrics | grep collector_    # self-metrics
+make consume                          # keys + headers of telemetry.otlp
+curl -s localhost:9464/metrics | grep collector_   # self-metrics
 ```
 
-## Operations
+You should see records keyed by tenant (`dev`) with headers
+`signal=metrics|logs`, and `collector_received_events_total` climbing every
+5s (the agent's export interval).
 
-- `:4317` OTLP/gRPC (agent-facing), `:9464` HTTP `/metrics` + `/healthz`,
-  plus the standard gRPC health service for Kubernetes probes.
-- Self-metrics: `collector_received_events_total{tenant,signal}`,
-  `collector_rejected_events_total{tenant,reason}`,
-  `collector_ingest_queue_depth`, `collector_produced_records_total{result}`.
-- Shutdown drains front-to-back (stop gRPC → drain queue → flush producer),
-  making rolling restarts lossless within the termination grace period.
+## Exercises
 
-## Azure Event Hubs
+Each exercise is marked in the source with a banner comment containing hints
+and references. Suggested order:
 
-Event Hubs exposes a Kafka-protocol endpoint; switching is config-only:
+1. `internal/tenant` — constant-time key comparison + two-key rotation
+2. `internal/tenant` — collector-wide (global) rate limiter
+3. `internal/pipeline` — `drop_oldest` overload policy (and the essay question)
+4. `internal/sink` — dead-letter topic for terminal produce errors
+5. `internal/server` — OTLP `PartialSuccess` responses
+6. `internal/server` — `RetryInfo` backoff hints on rejection
+7. `cmd/collector` (stretch) — pprof + one measured hot-path optimization
 
-```yaml
-kafka:
-  brokers: ["<namespace>.servicebus.windows.net:9093"]
-  tls: true
-  sasl:
-    enabled: true
-    username: "$ConnectionString"
-    password: "${EVENTHUBS_CONN_STR}"
-```
+Rule of the game: after each exercise, prove it with either a unit test or a
+metric visible on `/metrics`, and write two sentences in this README about
+the trade-off you chose. Those sentences are interview answers.
 
-## Non-goals
+## Reading list (why this shape)
 
-Traces ingestion, payload transformation/enrichment, TLS termination, and
-storage — these belong to other components of the pipeline (stream processor,
-ClickHouse, query API).
+- Load shedding & bounded queues — AWS Builders' Library:
+  https://aws.amazon.com/builders-library/using-load-shedding-to-avoid-overload/
+- Retries, backoff, jitter:
+  https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
+- OTLP protocol (responses, retryability, partial success):
+  https://opentelemetry.io/docs/specs/otlp/
+- OTel Collector architecture (the production-grade sibling of this design):
+  https://opentelemetry.io/docs/collector/architecture/
+- Kafka exactly-once, and why the consumer finishes the job:
+  https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/
+- The Log (Kreps) — the conceptual foundation of this whole pipeline:
+  https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying
+- Azure Event Hubs' Kafka endpoint (the zero-code-change cloud swap):
+  https://learn.microsoft.com/en-us/azure/event-hubs/azure-event-hubs-apache-kafka-overview
+
+## Non-goals (scope control)
+
+Traces ingestion, payload transformation/enrichment, TLS termination (put a
+proxy in front or do the TLS stretch exercise), and storage — those belong to
+later stages of the project (stream processor, ClickHouse, query API).

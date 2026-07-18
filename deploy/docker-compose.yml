@@ -3,6 +3,7 @@
 # Two Kafka listeners because Docker networking:
 #   kafka:9092       — for containers on the compose network (the collector)
 #   localhost:29092  — for processes on the host (kcat, console consumer, you)
+# Why this dance is always needed: https://www.confluent.io/blog/kafka-listeners-explained/
 services:
   kafka:
     image: apache/kafka:3.8.1
