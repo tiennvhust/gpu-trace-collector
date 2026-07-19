@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -44,11 +45,19 @@ func main() {
 	metrics.RegisterQueueDepth(queue.Depth)
 
 	reg := tenant.NewRegistry(cfg.Tenants)
+
+	// » global_events_per_sec absent/zero means "no global limit": rate.Inf
+	// » makes AllowN always true, so the handlers need no nil check.
+	lim := rate.NewLimiter(rate.Inf, 0)
+	if cfg.GlobalEventsPerSec > 0 {
+		lim = rate.NewLimiter(rate.Limit(cfg.GlobalEventsPerSec), cfg.GlobalBurst)
+	}
+
 	gs := grpc.NewServer(
 		grpc.MaxRecvMsgSize(cfg.MaxRecvMsgBytes),
 		grpc.ChainUnaryInterceptor(tenant.UnaryAuthInterceptor(reg, metrics)),
 	)
-	server.Register(gs, queue, metrics)
+	server.Register(gs, queue, metrics, lim)
 
 	hs := health.NewServer()
 	healthpb.RegisterHealthServer(gs, hs)

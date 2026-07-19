@@ -4,6 +4,7 @@ package tenant
 
 import (
 	"context"
+	"crypto/sha256"
 	"strings"
 
 	"golang.org/x/time/rate"
@@ -26,19 +27,31 @@ type Tenant struct {
 	Limiter *rate.Limiter
 }
 
-// Registry maps API keys to tenants. Built once at startup, read-only after,
-// therefore safe for concurrent use without locks.
+// Registry maps SHA-256 digests of API keys to tenants. Built once at
+// startup, read-only after, therefore safe for concurrent use without locks.
+//
+// » Indexing by digest instead of the raw key removes the timing side channel
+// » of a string-keyed map: lookup time now depends only on the hash, and
+// » crafting keys whose digests share a prefix is a preimage attack on
+// » SHA-256. A tenant may appear under two digests during key rotation.
 type Registry struct {
-	byKey map[string]*Tenant
+	byKey map[[32]byte]*Tenant
 }
 
 // NewRegistry builds the registry from configuration.
 func NewRegistry(tenants []config.Tenant) *Registry {
-	r := &Registry{byKey: make(map[string]*Tenant, len(tenants))}
+	r := &Registry{byKey: make(map[[32]byte]*Tenant, len(tenants))}
 	for _, t := range tenants {
-		r.byKey[t.APIKey] = &Tenant{
+		key := sha256.Sum256([]byte(t.APIKey))
+		tenant := &Tenant{
 			Name:    t.Name,
 			Limiter: rate.NewLimiter(rate.Limit(t.EventsPerSec), t.Burst),
+		}
+		r.byKey[key] = tenant
+
+		if t.APIKey2 != "" {
+			key2 := sha256.Sum256([]byte(t.APIKey2))
+			r.byKey[key2] = tenant
 		}
 	}
 	return r
@@ -46,7 +59,7 @@ func NewRegistry(tenants []config.Tenant) *Registry {
 
 // Lookup resolves an API key to a tenant.
 func (r *Registry) Lookup(key string) (*Tenant, bool) {
-	t, ok := r.byKey[key]
+	t, ok := r.byKey[sha256.Sum256([]byte(key))]
 	return t, ok
 }
 

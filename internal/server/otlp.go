@@ -9,6 +9,7 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -24,6 +25,7 @@ type MetricsService struct {
 	colmetricspb.UnimplementedMetricsServiceServer
 	q *pipeline.Queue
 	m *obs.Metrics
+	l *rate.Limiter
 }
 
 // LogsService implements the OTLP logs Export RPC.
@@ -31,12 +33,13 @@ type LogsService struct {
 	collogspb.UnimplementedLogsServiceServer
 	q *pipeline.Queue
 	m *obs.Metrics
+	l *rate.Limiter
 }
 
 // Register attaches both services to the gRPC server.
-func Register(s *grpc.Server, q *pipeline.Queue, m *obs.Metrics) {
-	colmetricspb.RegisterMetricsServiceServer(s, &MetricsService{q: q, m: m})
-	collogspb.RegisterLogsServiceServer(s, &LogsService{q: q, m: m})
+func Register(s *grpc.Server, q *pipeline.Queue, m *obs.Metrics, l *rate.Limiter) {
+	colmetricspb.RegisterMetricsServiceServer(s, &MetricsService{q: q, m: m, l: l})
+	collogspb.RegisterLogsServiceServer(s, &LogsService{q: q, m: m, l: l})
 }
 
 // Export handles one metrics export request:
@@ -59,6 +62,12 @@ func (s *MetricsService) Export(ctx context.Context,
 		s.m.Rejected.WithLabelValues(t.Name, "rate_limit").Inc()
 		return nil, status.Error(codes.ResourceExhausted,
 			"per-tenant rate limit exceeded, retry with backoff")
+	}
+
+	if !s.l.AllowN(time.Now(), n) {
+		s.m.Rejected.WithLabelValues(t.Name, "global_rate_limit").Inc()
+		return nil, status.Error(codes.ResourceExhausted,
+			"global rate limit exceeded, retry with backoff")
 	}
 
 	payload, err := proto.Marshal(req)
@@ -94,6 +103,11 @@ func (s *LogsService) Export(ctx context.Context,
 		s.m.Rejected.WithLabelValues(t.Name, "rate_limit").Inc()
 		return nil, status.Error(codes.ResourceExhausted,
 			"per-tenant rate limit exceeded, retry with backoff")
+	}
+	if !s.l.AllowN(time.Now(), n) {
+		s.m.Rejected.WithLabelValues(t.Name, "global_rate_limit").Inc()
+		return nil, status.Error(codes.ResourceExhausted,
+			"global rate limit exceeded, retry with backoff")
 	}
 	payload, err := proto.Marshal(req)
 	if err != nil {

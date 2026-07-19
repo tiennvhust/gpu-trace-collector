@@ -30,6 +30,7 @@ type Tenant struct {
 	APIKey       string  `yaml:"api_key"`
 	EventsPerSec float64 `yaml:"events_per_sec"`
 	Burst        int     `yaml:"burst"`
+	APIKey2      string  `yaml:"api_key2"`
 }
 
 // Config is the root configuration.
@@ -41,6 +42,8 @@ type Config struct {
 	MaxRecvMsgBytes int      `yaml:"max_recv_msg_bytes"`
 	Kafka           Kafka    `yaml:"kafka"`
 	Tenants         []Tenant `yaml:"tenants"`
+	GlobalEventsPerSec float64 `yaml:"global_events_per_sec"`
+	GlobalBurst        int     `yaml:"global_burst"`
 }
 
 // Load reads path, expands ${ENV_VARS}, unmarshals, applies defaults and
@@ -93,6 +96,10 @@ func (c *Config) validate() error {
 	if len(c.Tenants) == 0 {
 		return errors.New("config: at least one tenant is required")
 	}
+	
+	if c.GlobalEventsPerSec > 0 && c.GlobalBurst <= 0 {
+		return errors.New("config: global_burst must be > 0 when global_events_per_sec is set")
+	}
 	seen := map[string]bool{}
 	for _, t := range c.Tenants {
 		if t.Name == "" || t.APIKey == "" {
@@ -102,6 +109,15 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: duplicate api_key for tenant %q", t.Name)
 		}
 		seen[t.APIKey] = true
+		if t.APIKey2 != "" {
+			if t.APIKey == t.APIKey2 {
+				return fmt.Errorf("config: tenant %q: api_key2 must differ from api_key", t.Name)
+			}
+			if seen[t.APIKey2] {
+				return fmt.Errorf("config: duplicate api_key2 for tenant %q", t.Name)
+			}
+			seen[t.APIKey2] = true
+		}
 		if t.EventsPerSec <= 0 {
 			return fmt.Errorf("config: tenant %q: events_per_sec must be > 0", t.Name)
 		}
