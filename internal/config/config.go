@@ -35,15 +35,15 @@ type Tenant struct {
 
 // Config is the root configuration.
 type Config struct {
-	GRPCListen      string   `yaml:"grpc_listen"`
-	HTTPListen      string   `yaml:"http_listen"`
-	QueueCapacity   int      `yaml:"queue_capacity"`
-	Workers         int      `yaml:"workers"`
-	MaxRecvMsgBytes int      `yaml:"max_recv_msg_bytes"`
-	Kafka           Kafka    `yaml:"kafka"`
-	Tenants         []Tenant `yaml:"tenants"`
-	GlobalEventsPerSec float64 `yaml:"global_events_per_sec"`
-	GlobalBurst        int     `yaml:"global_burst"`
+	GRPCListen         string   `yaml:"grpc_listen"`
+	HTTPListen         string   `yaml:"http_listen"`
+	QueueCapacity      int      `yaml:"queue_capacity"`
+	Workers            int      `yaml:"workers"`
+	MaxRecvMsgBytes    int      `yaml:"max_recv_msg_bytes"`
+	Kafka              Kafka    `yaml:"kafka"`
+	Tenants            []Tenant `yaml:"tenants"`
+	GlobalEventsPerSec float64  `yaml:"global_events_per_sec"`
+	GlobalBurst        int      `yaml:"global_burst"`
 }
 
 // Load reads path, expands ${ENV_VARS}, unmarshals, applies defaults and
@@ -96,7 +96,7 @@ func (c *Config) validate() error {
 	if len(c.Tenants) == 0 {
 		return errors.New("config: at least one tenant is required")
 	}
-	
+
 	if c.GlobalEventsPerSec > 0 && c.GlobalBurst <= 0 {
 		return errors.New("config: global_burst must be > 0 when global_events_per_sec is set")
 	}
