@@ -46,7 +46,7 @@ type Tenant struct {
 // The map lookup below leaks timing information and supports exactly one key
 // per tenant, which makes key rotation a hard cutover.
 //
- // Task A: compare keys with crypto/subtle.ConstantTimeCompare. Note you can't
+// Task A: compare keys with crypto/subtle.ConstantTimeCompare. Note you can't
 //         constant-time a map lookup directly — think about hashing the
 //         presented key first (e.g. sha256) and indexing by the digest.
 // Task B: allow each tenant TWO active keys (primary + next) so rotation is
