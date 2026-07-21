@@ -9,6 +9,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Overload policy values for Config.OverloadPolicy — what the ingest queue
+// does when it's full. See internal/pipeline.Queue.Enqueue for the trade-off.
+const (
+	OverloadPolicyRejectNew  = "reject_new"
+	OverloadPolicyDropOldest = "drop_oldest"
+)
+
 // SASL configures SASL/PLAIN authentication toward the Kafka endpoint.
 type SASL struct {
 	Enabled  bool   `yaml:"enabled"`
@@ -38,6 +45,9 @@ type Config struct {
 	GRPCListen         string   `yaml:"grpc_listen"`
 	HTTPListen         string   `yaml:"http_listen"`
 	QueueCapacity      int      `yaml:"queue_capacity"`
+	// OverloadPolicy is "reject_new" (default) or "drop_oldest" — what
+	// happens when the ingest queue is full. See OverloadPolicyRejectNew.
+	OverloadPolicy     string   `yaml:"overload_policy"`
 	Workers            int      `yaml:"workers"`
 	MaxRecvMsgBytes    int      `yaml:"max_recv_msg_bytes"`
 	Kafka              Kafka    `yaml:"kafka"`
@@ -87,6 +97,9 @@ func (c *Config) applyDefaults() {
 	if c.Kafka.Topic == "" {
 		c.Kafka.Topic = "telemetry.otlp"
 	}
+	if c.OverloadPolicy == "" {
+		c.OverloadPolicy = OverloadPolicyRejectNew
+	}
 }
 
 func (c *Config) validate() error {
@@ -99,6 +112,10 @@ func (c *Config) validate() error {
 
 	if c.GlobalEventsPerSec > 0 && c.GlobalBurst <= 0 {
 		return errors.New("config: global_burst must be > 0 when global_events_per_sec is set")
+	}
+	if c.OverloadPolicy != OverloadPolicyRejectNew && c.OverloadPolicy != OverloadPolicyDropOldest {
+		return fmt.Errorf("config: overload_policy must be %q or %q, got %q",
+			OverloadPolicyRejectNew, OverloadPolicyDropOldest, c.OverloadPolicy)
 	}
 	seen := map[string]bool{}
 	for _, t := range c.Tenants {

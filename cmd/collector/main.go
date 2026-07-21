@@ -41,7 +41,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("sink: %v", err)
 	}
-	queue := pipeline.New(cfg.QueueCapacity, cfg.Workers, kafka, metrics)
+	queue := pipeline.New(cfg.QueueCapacity, cfg.Workers, kafka, metrics, cfg.OverloadPolicy)
 	metrics.RegisterQueueDepth(queue.Depth)
 
 	reg := tenant.NewRegistry(cfg.Tenants)

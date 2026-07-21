@@ -33,12 +33,13 @@ type Queue struct {
 	ch   chan Item
 	sink Sink
 	m    *obs.Metrics
-	wg   sync.WaitGroup
+	wg     sync.WaitGroup
+	policy string // "reject_new" | "drop_oldest"
 }
 
 // New creates the queue and starts `workers` drain goroutines.
-func New(capacity, workers int, sink Sink, m *obs.Metrics) *Queue {
-	q := &Queue{ch: make(chan Item, capacity), sink: sink, m: m}
+func New(capacity, workers int, sink Sink, m *obs.Metrics, policy string) *Queue {
+	q := &Queue{ch: make(chan Item, capacity), sink: sink, m: m, policy: policy}
 	for i := 0; i < workers; i++ {
 		q.wg.Add(1)
 		go q.worker()
@@ -46,13 +47,44 @@ func New(capacity, workers int, sink Sink, m *obs.Metrics) *Queue {
 	return q
 }
 
-// Enqueue adds an item without blocking; it fails fast when full.
 func (q *Queue) Enqueue(it Item) error {
 	select {
 	case q.ch <- it:
 		return nil
 	default:
+	}
+
+	if q.policy != dropOldestPolicy {
 		return ErrQueueFull
+	}
+
+	// » Keep evicting the head until the new item fits. Between our failed
+	// » send above and the receive below, a worker may have already drained
+	// » a slot — then the receive's default fires (nothing to evict) and we
+	// » go straight to the send. Between our receive and our send, another
+	// » producer may steal the slot we just freed — then the send's default
+	// » fires and we loop back to evict again. Both races are harmless: they
+	// » only change how many items we evict before our send succeeds, never
+	// » whether it eventually does (the channel is bounded and only workers
+	// » ever shrink it further, so we can't be racing something that grows
+	// » the queue out from under us).
+	for {
+		select {
+		case old := <-q.ch:
+			// » The evicted item's producer already got an OK response —
+			// » from its point of view the data vanished before Kafka, the
+			// » same observable outcome as a produce error. Reuse the
+			// » existing Rejected series (tenant + reason) rather than add a
+			// » new metric family for it.
+			q.m.Rejected.WithLabelValues(old.Tenant, "dropped_oldest").Inc()
+		default:
+		}
+
+		select {
+		case q.ch <- it:
+			return nil
+		default:
+		}
 	}
 }
 
