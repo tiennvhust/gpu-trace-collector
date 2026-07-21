@@ -51,8 +51,13 @@ type Queue struct {
 	ch   chan Item
 	sink Sink
 	m    *obs.Metrics
-	wg   sync.WaitGroup
+	wg     sync.WaitGroup
+	policy string // "reject_new" | "drop_oldest"
 }
+
+// dropOldestPolicy is the overload_policy value that evicts the head of the
+// queue to make room for the newest item, instead of rejecting it.
+const dropOldestPolicy = "drop_oldest"
 
 // EXERCISE-BEGIN
 // ─── EXERCISE 3: an alternative overload policy ─────────────────────────────
@@ -72,8 +77,8 @@ type Queue struct {
 // EXERCISE-END
 
 // New creates the queue and starts `workers` drain goroutines.
-func New(capacity, workers int, sink Sink, m *obs.Metrics) *Queue {
-	q := &Queue{ch: make(chan Item, capacity), sink: sink, m: m}
+func New(capacity, workers int, sink Sink, m *obs.Metrics, policy string) *Queue {
+	q := &Queue{ch: make(chan Item, capacity), sink: sink, m: m, policy: policy}
 	for i := 0; i < workers; i++ {
 		q.wg.Add(1)
 		go q.worker()
@@ -81,18 +86,56 @@ func New(capacity, workers int, sink Sink, m *obs.Metrics) *Queue {
 	return q
 }
 
-// Enqueue adds an item without blocking; it fails fast when full.
+// Enqueue adds an item, honoring the configured overload policy.
 //
 // » Non-blocking is deliberate: blocking here would smear queue-full latency
 // » into every in-flight RPC and hide saturation from clients. Failing fast
 // » keeps rejection cheap and observable. "Fail fast" discussion:
 // » https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
+//
+// » reject_new (default): the new item is refused; the caller sees
+// » ResourceExhausted and retries with backoff. drop_oldest: the head of the
+// » queue is evicted to make room, so the newest item always gets in — at
+// » the cost of silently losing whatever was evicted (its producer was
+// » already told "accepted").
 func (q *Queue) Enqueue(it Item) error {
 	select {
 	case q.ch <- it:
 		return nil
 	default:
+	}
+
+	if q.policy != dropOldestPolicy {
 		return ErrQueueFull
+	}
+
+	// » Keep evicting the head until the new item fits. Between our failed
+	// » send above and the receive below, a worker may have already drained
+	// » a slot — then the receive's default fires (nothing to evict) and we
+	// » go straight to the send. Between our receive and our send, another
+	// » producer may steal the slot we just freed — then the send's default
+	// » fires and we loop back to evict again. Both races are harmless: they
+	// » only change how many items we evict before our send succeeds, never
+	// » whether it eventually does (the channel is bounded and only workers
+	// » ever shrink it further, so we can't be racing something that grows
+	// » the queue out from under us).
+	for {
+		select {
+		case old := <-q.ch:
+			// » The evicted item's producer already got an OK response —
+			// » from its point of view the data vanished before Kafka, the
+			// » same observable outcome as a produce error. Reuse the
+			// » existing Rejected series (tenant + reason) rather than add a
+			// » new metric family for it.
+			q.m.Rejected.WithLabelValues(old.Tenant, "dropped_oldest").Inc()
+		default:
+		}
+
+		select {
+		case q.ch <- it:
+			return nil
+		default:
+		}
 	}
 }
 
