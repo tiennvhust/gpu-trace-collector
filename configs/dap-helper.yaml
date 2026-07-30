@@ -1,0 +1,52 @@
+# DAP helper aggregator configuration.
+#
+# » Note what is NOT here: no helper_url, no aggregation driver settings, no
+# » pending queue. The helper is stateless between jobs apart from its aggregate
+# » share and its anti-replay set, and that simplicity is a design goal — someone
+# » has to be willing to run this role for the trust model to exist at all. See
+# » internal/dap/helper.go.
+#
+# » AND NOTE WHAT IS DUPLICATED: the task parameters below must match the leader's
+# » exactly. There is no mechanism in base DAP that checks this — a mismatch in
+# » min_batch_size means the two aggregators enforce different privacy rules, and
+# » the weaker one wins. That is the problem draft-ietf-ppm-dap-taskprov solves by
+# » deriving the task ID from a hash of the parameters, so a mismatch produces
+# » "unrecognized task" instead of a silent downgrade. Implement it
+# » (internal/dap/task.go EXERCISE 47) and then deliberately change one number
+# » here to watch the detection work.
+
+dap_listen: ":8081"      # only the leader calls this — authenticate it
+metrics_listen: ":9466"  # PRIVATE
+
+# » The leader is the ONLY authorised caller. An unauthenticated helper is a free
+# » aggregation oracle: anyone can submit a job and learn whether reports verify.
+# » Reject unauthenticated requests before parsing the body.
+leader_auth_token: "${DAP_HELPER_TOKEN}"
+
+hpke:
+  - id: 1
+    kem: 0x0020
+    kdf: 0x0001
+    aead: 0x0001
+    private_key: "${DAP_HELPER_HPKE_KEY_1}"
+
+tasks:
+  - id: ""                        # must derive to the same ID as the leader's task
+    vdaf: histogram
+    buckets: 16
+    chunk_length: 4
+    verify_key: "${DAP_VERIFY_KEY_GPU_UTIL}"   # the SAME key as the leader
+
+    time_precision: 1h
+    min_batch_size: 1000          # the helper enforces this from its OWN state
+    max_batch_query_count: 1
+    query_type: time_interval
+    report_expiry: 4h
+
+    # » The helper does not add noise — the collector does — so epsilon is here
+    # » only to participate in the derived task ID and to be checked against the
+    # » leader's. If you decided in EXERCISE 47 that epsilon should not be in the
+    # » derived ID, delete these and say why in docs/PRIVACY.md.
+    epsilon: 1.0
+    delta: 1.0e-6
+    epsilon_budget: 4.0

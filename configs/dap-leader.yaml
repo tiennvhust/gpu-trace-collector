@@ -1,0 +1,60 @@
+# DAP leader aggregator configuration.
+#
+# ${VARS} are expanded from the environment at load time. HPKE private keys and
+# the VDAF verify key MUST come from the environment — a verify key in a file in
+# git means any client can forge a valid proof, and a leaked HPKE private key
+# means one party can open both input shares, which collapses the entire
+# two-aggregator trust model to nothing.
+#
+# » DELIBERATELY SEPARATE from dap-helper.yaml, and do not be tempted to factor
+# » out the shared parts. In a real deployment these two files live at two
+# » different companies and are edited by two different on-call rotations; a local
+# » setup that cannot drift is a local setup that will not teach you what drift
+# » looks like. See cmd/dap-helper/main.go EXERCISE 69.
+
+dap_listen: ":8080"      # public: clients upload here, the collector collects here
+metrics_listen: ":9465"  # PRIVATE: never expose this — it publishes your ε ledger
+
+helper_url: "http://helper:8081"
+helper_timeout: 10s      # every cross-organisation call needs one
+helper_auth_token: "${DAP_HELPER_TOKEN}"
+
+max_reports_per_job: 1000       # aggregation batch size — see messages.go on batching
+pending_queue_capacity: 100000  # bounded; when full, uploads get 503 + Retry-After
+
+hpke:
+  - id: 1
+    kem: 0x0020            # DHKEM(X25519, HKDF-SHA256)
+    kdf: 0x0001            # HKDF-SHA256
+    aead: 0x0001           # AES-128-GCM
+    private_key: "${DAP_LEADER_HPKE_KEY_1}"
+  # » A SECOND config, overlapping in validity, is how rotation works without a
+  # » hard cutover — the same pattern as api_key2 in the collector's tenants.
+  # » Retire a key only after the last client's cached config has expired;
+  # » reports encrypted to a deleted key are silently unrecoverable.
+  # - id: 2
+  #   kem: 0x0020
+  #   kdf: 0x0001
+  #   aead: 0x0001
+  #   private_key: "${DAP_LEADER_HPKE_KEY_2}"
+
+tasks:
+  - id: ""                        # empty: derive from the parameters (taskprov)
+    vdaf: histogram
+    buckets: 16
+    chunk_length: 4
+    verify_key: "${DAP_VERIFY_KEY_GPU_UTIL}"
+
+    time_precision: 1h            # batch granularity; report times round down to it
+    min_batch_size: 1000          # refuse to collect a smaller batch
+    max_batch_query_count: 1      # >1 lets the collector average away the noise
+    query_type: time_interval     # time_interval | fixed_size
+    report_expiry: 4h             # bounds the anti-replay set and clock-skew tolerance
+
+    # » THE TWO NUMBERS THAT DEFINE THE PRIVACY GUARANTEE. epsilon is per
+    # » collection; epsilon_budget is the total per period. 4/1 means four
+    # » collections before the task goes quiet — and "goes quiet" is an alerting
+    # » condition, not a silent one. See internal/dp/accountant.go EXERCISE 9.
+    epsilon: 1.0
+    delta: 1.0e-6
+    epsilon_budget: 4.0

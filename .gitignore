@@ -1,2 +1,11 @@
 bin/
 *.test
+
+# Local secrets for the private path: HPKE private keys, VDAF verify keys, the
+# leader/helper auth token. `make keys` writes this. A committed verify key lets
+# any client forge a valid proof and poison the aggregate undetectably.
+.env.privacy
+
+# Profiles and fuzz artefacts from the benchmark and fuzz targets.
+*.prof
+*.pprof

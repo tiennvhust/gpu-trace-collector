@@ -1,0 +1,87 @@
+# The `privacy:` block for collector.yaml — the private path's configuration.
+#
+# » Kept in its own file while the private path is under construction so the
+# » working collector config stays untouched and the plaintext path stays exactly
+# » as proven as it was. Paste this block into collector.yaml when you do the
+# » wiring exercise (internal/privacy/path.go EXERCISE 65).
+#
+# » ABSENT MEANS OFF. An existing deployment's collector.yaml keeps working with no
+# » change, which is the property that makes this safe to ship incrementally.
+
+privacy:
+  enabled: true
+  queue_capacity: 8192   # bounded; full means drop-and-count, never fail the OTLP RPC
+  workers: 2             # sharding is CPU-bound, uploading is IO-bound«, see EXERCISE 64»
+
+  tasks:
+    # ── fleet-wide GPU utilisation distribution ────────────────────────────────
+    # » Why this metric first: a tenant already gets per-device utilisation on the
+    # » plaintext path, inside its own trust boundary. What it CANNOT get, and what
+    # » nothing else in the pipeline can produce, is the cross-tenant distribution —
+    # » "is my 40% utilisation good?" needs everyone else's numbers, and nobody
+    # » will share them in the clear. That is the case for the private path in one
+    # » sentence, and it is the sentence to lead with in the README.
+    - leader_url: "http://localhost:8080"
+      helper_url: "http://localhost:8081"     # MUST be a different organisation
+      vdaf: histogram
+      buckets: 16
+      chunk_length: 4
+      verify_key: "${DAP_VERIFY_KEY_GPU_UTIL}"
+
+      metric:
+        name: "gpu.sm.utilization"
+        bucketing: linear    # utilisation is uniform-ish over [0,100]; use log for durations
+        lo: 0
+        hi: 100
+
+      time_precision: 1h
+      min_batch_size: 1000
+
+      # » 16 buckets and a minimum batch of 1000 gives ~62 reports per bucket
+      # » expected, against a per-bucket noise standard deviation of about 1.4 at
+      # » ε = 1. Signal/noise ≈ 44, comfortably usable. Try buckets: 1024 and watch
+      # » EXERCISE 67's utility check refuse to start the task — that refusal is the
+      # » feature.
+      epsilon: 1.0
+      delta: 1.0e-6
+      epsilon_budget: 4.0
+
+    # ── CUDA error rate across the fleet ──────────────────────────────────────
+    # » A count, so Prio3Count: one bit per device per window. The cheapest possible
+    # » private measurement, and a good first task to get working end to end.
+    - leader_url: "http://localhost:8080"
+      helper_url: "http://localhost:8081"
+      vdaf: count
+      verify_key: "${DAP_VERIFY_KEY_GPU_ERRORS}"
+
+      metric:
+        name: "gpu.cuda.errors"
+        threshold: 0     # any value above 0 records a 1
+
+      time_precision: 1h
+      min_batch_size: 1000
+      epsilon: 0.5
+      delta: 1.0e-6
+      epsilon_budget: 2.0
+
+    # ── kernel duration distribution ──────────────────────────────────────────
+    # » Commented out on purpose: this is the task where the bucketing decision
+    # » actually bites. Kernels run from ~2 µs to ~200 ms, so linear buckets put
+    # » nearly all the mass in bucket 0 and the metric tells you nothing. Work
+    # » through EXERCISE 61's design question, choose the boundaries, and enable it.
+    # - leader_url: "http://localhost:8080"
+    #   helper_url: "http://localhost:8081"
+    #   vdaf: histogram
+    #   buckets: 24
+    #   chunk_length: 5
+    #   verify_key: "${DAP_VERIFY_KEY_KERNEL_DUR}"
+    #   metric:
+    #     name: "gpu.kernel.duration"
+    #     bucketing: log
+    #     lo: 0.000001
+    #     hi: 0.2
+    #   time_precision: 1h
+    #   min_batch_size: 1000
+    #   epsilon: 1.0
+    #   delta: 1.0e-6
+    #   epsilon_budget: 4.0

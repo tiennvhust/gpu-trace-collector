@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(go build ./...)",
+      "PowerShell(go vet ./... 2>$null)",
+      "PowerShell($candidates = @\\(\"$env:ProgramFiles\\\\Go\\\\bin\\\\go.exe\", \"$env:LOCALAPPDATA\\\\Programs\\\\Go\\\\bin\\\\go.exe\", \"C:\\\\Go\\\\bin\\\\go.exe\", \"$env:USERPROFILE\\\\go\\\\bin\\\\go.exe\", \"$env:USERPROFILE\\\\scoop\\\\apps\\\\go\\\\current\\\\bin\\\\go.exe\"\\); $candidates | Where-Object { Test-Path $_ })",
+      "PowerShell(wsl bash -lc \"cd '/mnt/c/Users/Tien Nguyen/Documents/gpu-trace-collector-public/gpu-trace-collector-public' && go build ./... && gofmt -l .\")",
+      "PowerShell(docker version --format '{{.Server.Version}}')",
+      "PowerShell(wsl bash -lc \"cd '/mnt/c/Users/Tien Nguyen/Documents/gpu-trace-collector-public/gpu-trace-collector-public' && go build ./... && go vet ./... && gofmt -l .\")",
+      "PowerShell(wsl bash -lc \"cd '/mnt/c/Users/Tien Nguyen/Documents/gpu-trace-collector-public/gpu-trace-collector-public' && go mod tidy && go build ./... && go vet ./... && gofmt -l .\")",
+      "PowerShell(wsl bash -lc \"cd '/mnt/c/Users/Tien Nguyen/Documents/gpu-trace-collector-public/gpu-trace-collector-public' && gofmt -d internal/config/config.go internal/tenant/tenant.go\")",
+      "PowerShell(wsl bash -lc \"cd '/mnt/c/Users/Tien Nguyen/Documents/gpu-trace-collector-public/gpu-trace-collector-public' && gofmt -w internal/config/config.go internal/tenant/tenant.go && go build ./... && go vet ./... && gofmt -l . && echo ALL-CLEAN\")",
+      "PowerShell(wsl bash -lc \"cd '/mnt/c/Users/Tien Nguyen/Documents/gpu-trace-collector-public/gpu-trace-collector-public' && gofmt -l . ; go build ./... && go vet ./... && go test ./... && gofmt -l . && echo ALL-CLEAN\")",
+      "PowerShell(wsl --list --verbose)",
+      "PowerShell(wsl bash -lc \"echo hi\")",
+      "PowerShell($tools = @\\(\"kubectl\",\"kustomize\",\"kubeconform\"\\); foreach \\($t in $tools\\) { $c = Get-Command $t -ErrorAction SilentlyContinue; if \\($c\\) { \"$t -> $\\($c.Source\\)\" } else { \"$t -> \\(not found\\)\" } })",
+      "PowerShell(kubectl kustomize \"c:\\\\Users\\\\Tien Nguyen\\\\Documents\\\\gpu-trace-collector-public\\\\gpu-trace-collector-public\\\\deploy\\\\k8s\" | Out-String | Select-Object -First 1 | ForEach-Object { $_.Length } ; \"---exit:$LASTEXITCODE---\")",
+      "PowerShell(kubectl kustomize \"c:\\\\Users\\\\Tien Nguyen\\\\Documents\\\\gpu-trace-collector-public\\\\gpu-trace-collector-public\\\\deploy\\\\k8s\" | kubectl apply --dry-run=client -f - 2>&1 | Out-String; \"---exit:$LASTEXITCODE---\")"
+    ]
+  }
+}

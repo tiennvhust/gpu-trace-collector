@@ -1,0 +1,84 @@
+# The private aggregation path: two independently-configured DAP aggregators.
+#
+# Overlay on the base stack:
+#   docker compose -f docker-compose.yml -f docker-compose.privacy.yml up --build -d
+#
+# » THE POINT OF RUNNING TWO CONTAINERS. It would be less work to run both roles in
+# » one process behind two ports, and it would be wrong: the entire privacy
+# » guarantee is that no single party holds both input shares. A local deployment
+# » that shares a process, a config file or a secret between the aggregators is
+# » modelling the compromise rather than the protocol, and it will hide the class of
+# » bug that matters most — the two sides silently disagreeing.
+# »
+# » So: separate containers, separate config files with duplicated parameters,
+# » separate HPKE keys, separate metrics ports. The only thing they share is the
+# » VDAF verify key, which they genuinely must (see internal/vdaf/prio3/driver.go
+# » EXERCISE 25) and the shared auth token.
+services:
+  leader:
+    build: ..
+    command: ["/dap-leader", "-config", "/etc/dap/leader.yaml"]
+    ports:
+      - "8080:8080"   # public: client uploads, collector collections
+      - "9465:9465"   # metrics — see the warning below
+    volumes:
+      - ../configs/dap-leader.yaml:/etc/dap/leader.yaml:ro
+    environment:
+      # » Demo values. In a real deployment these come from a secret store — see
+      # » deploy/k8s/secret.example.yaml for the pattern already used for Kafka
+      # » credentials. A verify key in a compose file is fine on your laptop and a
+      # » critical vulnerability anywhere else, because it lets any client forge a
+      # » proof and poison the aggregate undetectably.
+      DAP_HELPER_TOKEN: "dev-helper-token"
+      DAP_LEADER_HPKE_KEY_1: "${DAP_LEADER_HPKE_KEY_1:-}"
+      DAP_VERIFY_KEY_GPU_UTIL: "${DAP_VERIFY_KEY_GPU_UTIL:-}"
+      DAP_VERIFY_KEY_GPU_ERRORS: "${DAP_VERIFY_KEY_GPU_ERRORS:-}"
+
+  helper:
+    build: ..
+    command: ["/dap-helper", "-config", "/etc/dap/helper.yaml"]
+    # » NO PUBLIC PORT MAPPING. The helper is reachable only from the compose
+    # » network, which is exactly its production posture: only the leader calls it.
+    # » If you find yourself adding a port here to debug something, add a test
+    # » instead — the reachability constraint is part of what you are building.
+    expose:
+      - "8081"
+    ports:
+      - "9466:9466"   # metrics only
+    volumes:
+      - ../configs/dap-helper.yaml:/etc/dap/helper.yaml:ro
+    environment:
+      DAP_HELPER_TOKEN: "dev-helper-token"
+      DAP_HELPER_HPKE_KEY_1: "${DAP_HELPER_HPKE_KEY_1:-}"
+      DAP_VERIFY_KEY_GPU_UTIL: "${DAP_VERIFY_KEY_GPU_UTIL:-}"
+      DAP_VERIFY_KEY_GPU_ERRORS: "${DAP_VERIFY_KEY_GPU_ERRORS:-}"
+
+# EXERCISE-BEGIN
+# ─── EXERCISE 71 (week 4): make the deployment tell the truth ────────────────
+# The compose file above runs both aggregators on one host with one Docker network,
+# which is convenient and is NOT the threat model. Close the gap where you can:
+#
+# Task A: add a `networks:` section so the client can reach only the leader and the
+#         leader can reach only the helper. Then confirm the client CANNOT reach the
+#         helper — and write that as an actual test, not a manual check.
+# Task B: add TLS between the leader and the helper with a self-signed CA, and
+#         mutual TLS so the helper authenticates the leader by certificate rather
+#         than a bearer token. This is a cross-organisation link over the public
+#         internet in production; a shared bearer token in a config file does not
+#         survive contact with two separate security teams.
+# Task C: add a `tc netem` sidecar, or just a configurable artificial delay in the
+#         leader's HTTP client, and run the load test with 50 ms and 200 ms of
+#         latency to the helper. That is what a real cross-org link looks like, and
+#         it is how you discover whether your aggregation driver's concurrency is
+#         actually sized correctly (EXERCISE 50). The numbers go in
+#         docs/BENCHMARKS.md — "throughput vs helper RTT" is a much more
+#         interesting chart than raw throughput on localhost, and it is the one
+#         that shows you thought about the deployment.
+# Task D: for the Kubernetes version (deploy/k8s/), note in the README that a real
+#         deployment puts the two aggregators in DIFFERENT CLUSTERS run by
+#         DIFFERENT ORGANISATIONS, and that a single kustomization deploying both
+#         is a convenience for testing. Be explicit that it is not the real
+#         topology — a reviewer who knows DAP will check for exactly this, and
+#         saying it yourself is much better than being asked.
+# ─────────────────────────────────────────────────────────────────────────────
+# EXERCISE-END

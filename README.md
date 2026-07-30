@@ -68,6 +68,58 @@ You should see records keyed by tenant (`dev`) with headers
 `signal=metrics|logs`, and `collector_received_events_total` climbing every
 5s (the agent's export interval).
 
+## The private path (Project A — in progress)
+
+A second ingest path where the collector **cannot** see any device's telemetry:
+OTLP datapoints become Prio3 reports, secret-shared across two non-colluding
+aggregators, and only a differentially-private aggregate is ever published.
+
+```
+agent ─OTLP/gRPC→ [ auth │ rate limit ] ─┬─▶ bounded queue ─▶ Kafka   (plaintext, existing)
+                                         └─▶ encode ─▶ shard ─┬─▶ DAP leader ──┐
+                                                              └─▶ DAP helper ──┤
+                                                collector ◀── noised aggregate ─┘
+```
+
+| package | what |
+|---|---|
+| `internal/vdaf/field` | GF(2^64 − 2^32 + 1) arithmetic, polynomials |
+| `internal/vdaf/xof` | seed expansion (TurboSHAKE128) |
+| `internal/vdaf/prio3` | Prio3Count / Sum / Histogram + the FLP proof system |
+| `internal/dap` | `draft-ietf-ppm-dap`: codec, HPKE, leader, helper, collector |
+| `internal/dp` | Laplace / Gaussian / discrete Gaussian, RDP accountant, ε ledger |
+| `internal/privacy` | OTLP → VDAF measurements, and the collector hook |
+
+Implemented from the specs, with **no new module dependencies** — the whole
+private path is Go standard library plus what the collector already used.
+
+**Start here:** [docs/STUDY.md](docs/STUDY.md) maps all 71 exercises onto weeks
+1–4 in dependency order. Then:
+
+```bash
+make test         # red — the failures ARE the task list, bottom-up
+make test-field   # week 2 starts here; nothing above it can work first
+make vectors      # the week-2 gate: the VDAF draft's own test vectors
+make up-privacy   # Kafka + collector + DAP leader + helper
+```
+
+Design and reasoning: [docs/PRIVACY.md](docs/PRIVACY.md) ·
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) ·
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+
+### Keeping the two editions in sync
+
+`scripts/strip-study.sh` generates the public (`main`) version of any file or
+tree from this branch, by removing `// »` teaching comments, `EXERCISE-BEGIN …
+EXERCISE-END` blocks, `«inline citations»` and study-only files. Write once
+here; generate there.
+
+```bash
+scripts/strip-study.sh internal/dp/noise.go          # to stdout
+scripts/strip-study.sh -o ../public-tree .           # whole tree, then gofmt -w
+scripts/strip-study.sh --check internal/dp/noise.go  # nonzero if study content remains
+```
+
 ## Exercises
 
 Each exercise is marked in the source with a banner comment containing hints
@@ -86,6 +138,27 @@ metric visible on `/metrics`, and write two sentences in this README about
 the trade-off you chose. Those sentences are interview answers.
 
 ## Reading list (why this shape)
+
+Privacy-preserving measurement (Project A):
+
+- VDAF — Prio3, Poplar1, test vectors in Appendix C:
+  https://datatracker.ietf.org/doc/draft-irtf-cfrg-vdaf/
+- DAP — the protocol the aggregators speak:
+  https://datatracker.ietf.org/doc/draft-ietf-ppm-dap/
+- DAP taskprov — task provisioning; co-authored by S. Wang (Apple) and
+  C. Patton (Cloudflare):
+  https://datatracker.ietf.org/doc/draft-ietf-ppm-dap-taskprov/
+- Corrigan-Gibbs & Boneh, "Prio: Private, Robust, and Scalable Computation of
+  Aggregate Statistics" (NSDI 2017) — the original, and very readable
+- Near & Abuah, *Programming Differential Privacy* — https://programmingdp.com
+- Canonne, Kamath & Steinke, "The Discrete Gaussian for Differential Privacy":
+  https://arxiv.org/abs/2004.00010
+- Mironov, "Rényi Differential Privacy": https://arxiv.org/abs/1702.07476
+- RFC 9180 (HPKE) — also what Apple's Private Relay and OHTTP build on
+- ISRG Divvi Up — reference implementations to read for shape, not to copy:
+  https://github.com/divviup/libprio-rs and https://github.com/divviup/janus
+
+The collector's original shape:
 
 - Load shedding & bounded queues — AWS Builders' Library:
   https://aws.amazon.com/builders-library/using-load-shedding-to-avoid-overload/
@@ -107,3 +180,7 @@ the trade-off you chose. Those sentences are interview answers.
 Traces ingestion, payload transformation/enrichment, TLS termination (put a
 proxy in front or do the TLS stretch exercise), and storage — those belong to
 later stages of the project (stream processor, ClickHouse, query API).
+
+On the private path: Poplar1 / heavy hitters, homomorphic encryption, trusted
+execution, and general MPC beyond additive secret sharing. Private *training*
+across devices is Project B, a separate repository.
