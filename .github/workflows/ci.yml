@@ -1,0 +1,99 @@
+# gpu-trace-collector — CI
+#
+# Two jobs, deliberately separate so a red tick tells you *which* thing broke
+# without opening the log: does it compile and pass tests, and does the image
+# build.
+#
+# The "do the shipped configs still parse" check is NOT a CI job — it is
+# internal/config/configs_test.go, so it runs on your laptop too. A check that
+# only exists in a workflow file is a check you cannot run before pushing.
+#
+# Not here yet, on purpose:
+#   * golangci-lint — worth adding, but it will find things on a codebase this
+#     size and day 2 needs a green baseline first. Add it once, as its own PR.
+#   * `make fuzz` — slow, and it belongs on a schedule. See the note at the end.
+name: ci
+
+on:
+  # Every branch, deliberately. This repo's work happens on long-lived side
+  # branches (`learning`, `learning_pri`), and a branch filter that lists only
+  # `main` means CI never runs on the branch you are actually editing — which is
+  # the failure mode where a repo has a green badge and no working CI.
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A second push to the same branch cancels the first. Saves runner minutes and
+# stops a stale red tick outliving the commit that fixed it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # go-version-file reads go.mod, so the toolchain can never drift from what
+      # the module declares. Do not also pin a version here — two sources of
+      # truth is how you get a CI that compiles what your laptop cannot.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go mod download
+
+      # Build before vet: a compile error should read as a compile error, not as
+      # a wall of vet noise downstream of it.
+      - run: go build ./...
+      - run: go vet ./...
+
+      # -race is the reason to run these in CI at all. The collector is a bounded
+      # queue with N workers feeding a Kafka sink; the bugs that matter here are
+      # exactly the ones a single-threaded local run never sees.
+      - name: unit tests
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: coverage
+        run: go tool cover -func=coverage.out | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Build only — no push. Publishing is a release concern and needs a
+      # registry decision (GHCR for the agent, ACR per infra/main.tf for this
+      # one). The e2e-kind workflow in gpu-telemetry-infra builds this same
+      # Dockerfile and loads it into a cluster, so "does it build" is checked
+      # here and "does it run" is checked there.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: gpu-trace-collector:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+# ─────────────────────────────────────────────────────────────────────────────
+# NIGHTLY — add as .github/workflows/nightly.yml once the above is green:
+#
+#   on:
+#     schedule: [{ cron: "0 3 * * *" }]
+#   jobs:
+#     fuzz:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: actions/checkout@v4
+#         - uses: actions/setup-go@v5
+#           with: { go-version-file: go.mod, cache: true }
+#         - run: go test -run='^$' -fuzz=. -fuzztime=10m ./internal/dap/
+#
+# Fuzzing the DAP codec on a schedule is the right shape: it finds things over
+# hours rather than over one push, and a nightly failure is a bug report rather
+# than a blocked merge.
+# ─────────────────────────────────────────────────────────────────────────────
