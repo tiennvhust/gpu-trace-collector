@@ -37,6 +37,8 @@ type Queue struct {
 	policy string // "reject_new" | "drop_oldest"
 }
 
+const dropOldestPolicy = "drop_oldest"
+
 // New creates the queue and starts `workers` drain goroutines.
 func New(capacity, workers int, sink Sink, m *obs.Metrics, policy string) *Queue {
 	q := &Queue{ch: make(chan Item, capacity), sink: sink, m: m, policy: policy}
